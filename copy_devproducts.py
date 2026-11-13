@@ -11,6 +11,7 @@ Usage:
     python copy_devproducts.py copy all  SOURCE TARGET
     python copy_devproducts.py list all  UNIVERSE
     python copy_devproducts.py upload FOLDER_OR_FILES... [--group GROUP_ID]
+    python copy_devproducts.py perms UNIVERSE ASSET_IDS_OR_FILES... [--subject universe|group|user] [--dry-run]
     python copy_devproducts.py lang pl                          # en / pl, saved to settings.json
 
 SOURCE / TARGET / UNIVERSE are universe IDs (from the dashboard URL: .../experiences/<universeId>/...).
@@ -35,6 +36,10 @@ HERE = Path(__file__).resolve().parent
 THUMBS = "https://thumbnails.roblox.com/v1/assets"
 ASSETS = "https://apis.roblox.com/assets/user-auth/v1"
 ASSET_DELIVERY = "https://assetdelivery.roblox.com/v1/asset/"
+PERMISSIONS = "https://apis.roblox.com/asset-permissions-api/v1"
+SUBJECT_TYPES = {"universe": "Universe", "group": "Group", "user": "User"}
+PERMISSION_BATCH = 25  # assets per request
+TEXT_SUFFIXES = {".lua", ".luau", ".txt", ".json", ".md", ".csv"}
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".bmp": "image/bmp",
                ".tga": "image/tga"}
 
@@ -153,6 +158,19 @@ class Roblox:
                 break
             time.sleep(3)
         return {"name": path.stem, "decalId": decal_id, "imageId": image_id}
+
+    def grant_asset_permission(self, subject_type: str, subject_id: int, asset_ids: list[int],
+                               action: str = "Use") -> dict:
+        """Lets an experience (or group / user) use assets owned by somebody else - e.g. animations,
+        meshes, sounds from another group. Needs edit rights on the assets. Returns
+        {"successAssetIds": [...], "errors": [...]}."""
+        body = {
+            "subjectType": SUBJECT_TYPES[subject_type],
+            "subjectId": str(subject_id),
+            "action": action,
+            "requests": [{"assetId": a} for a in asset_ids],
+        }
+        return self.request("PATCH", f"{PERMISSIONS}/assets/permissions", json=body) or {}
 
     def download_icon(self, asset_id: int) -> bytes | None:
         if not asset_id:
@@ -389,6 +407,66 @@ def upload_images(rbx: Roblox, paths: list[str], group_id: int | None = None) ->
     return results
 
 
+def asset_ids_from(sources: list[str]) -> list[int]:
+    """Asset IDs from the given items: plain numbers, or text/Lua files and folders (a folder's files,
+    not subfolders). In files, every rbxassetid://<id> and every 9-16 digit number counts."""
+    ids: list[int] = []
+    for raw in sources:
+        raw = str(raw).strip().strip('"')
+        if raw.isdigit():
+            ids.append(int(raw))
+            continue
+        p = Path(raw)
+        files = sorted(f for f in p.iterdir() if f.suffix.lower() in TEXT_SUFFIXES) if p.is_dir() else [p]
+        for f in files:
+            if not f.is_file():
+                continue
+            text = f.read_text(encoding="utf-8", errors="ignore")
+            ids.extend(int(m) for m in re.findall(r"rbxassetid://(\d+)", text))
+            ids.extend(int(m) for m in re.findall(r"(?<![\d.])\d{9,16}(?![\d.])", text))
+    return list(dict.fromkeys(ids))  # unique, in order
+
+
+def grant_permissions(rbx: Roblox, subject_type: str, subject_id: int, sources: list[str],
+                      dry_run: bool = False, interactive: bool = False, delay: float = 1.0) -> dict:
+    """Grants the 'Use' permission on the assets to the experience / group / user. Saves a report to lists/."""
+    ids = asset_ids_from(sources)
+    if not ids:
+        raise Abort(t("pm_none"))
+    print(t("pm_found", count=len(ids), subject=SUBJECT_TYPES[subject_type], id=subject_id))
+    if dry_run:
+        print("  " + ", ".join(str(i) for i in ids))
+        print(t("dry_run"))
+        return {"success": [], "errors": []}
+    if interactive and not is_yes(input(t("pm_confirm", count=len(ids)))):
+        print(t("skipped"))
+        return {"success": [], "errors": []}
+
+    success: list[int] = []
+    errors: list = []
+    for start in range(0, len(ids), PERMISSION_BATCH):
+        batch = ids[start:start + PERMISSION_BATCH]
+        try:
+            res = rbx.grant_asset_permission(subject_type, subject_id, batch)
+            success.extend(res.get("successAssetIds") or [])
+            errors.extend(res.get("errors") or [])
+        except RuntimeError as e:
+            errors.append({"assetIds": batch, "error": str(e)})
+        print(t("pm_progress", done=min(start + PERMISSION_BATCH, len(ids)), total=len(ids)))
+        time.sleep(delay)
+
+    print(t("pm_done", ok=len(success), failed=len(ids) - len(success)))
+    for e in errors:
+        print("  " + json.dumps(e, ensure_ascii=False))
+    out_dir = HERE / "lists"
+    out_dir.mkdir(exist_ok=True)
+    stem = f"permissions_{subject_type}_{subject_id}_{time.strftime('%Y%m%d_%H%M%S')}"
+    (out_dir / f"{stem}.json").write_text(json.dumps({"success": success, "errors": errors}, indent=2),
+                                          encoding="utf-8")
+    print(t("saved_json", stem=f"lists/{stem}"))
+    return {"success": success, "errors": errors}
+
+
 def ask_int(prompt: str) -> int:
     while True:
         v = input(prompt).strip()
@@ -418,7 +496,7 @@ def menu():
     rbx = None
     while True:
         print()
-        for key in ("m_copy_dev", "m_copy_pass", "m_copy_all", "m_list", "m_upload"):
+        for key in ("m_copy_dev", "m_copy_pass", "m_copy_all", "m_list", "m_upload", "m_perms"):
             print(t(key))
         print(t("m_lang", lang=i18n.LANGUAGES[i18n.lang]))
         print(t("m_exit"))
@@ -428,7 +506,7 @@ def menu():
         if choice == "9":
             toggle_language()
             continue
-        if choice not in actions and choice != "5":
+        if choice not in actions and choice not in ("5", "6"):
             continue
         # Ask for the cookie only on the first action, so the language can be changed without signing in
         rbx = rbx or Roblox(load_cookie())
@@ -436,6 +514,14 @@ def menu():
             try:
                 upload_images(rbx, [input(t("ask_upload_path"))])
             except (Abort, RuntimeError) as e:
+                print(f"\n{e}")
+            continue
+        if choice == "6":
+            try:
+                subject_id = ask_int(t("ask_universe"))
+                sources = input(t("ask_asset_ids")).replace(",", " ").split()
+                grant_permissions(rbx, "universe", subject_id, sources, interactive=True)
+            except (Abort, RuntimeError, OSError) as e:
                 print(f"\n{e}")
             continue
         cmd, what = actions[choice]
@@ -479,6 +565,13 @@ def main():
     u.add_argument("paths", nargs="+", help=t("cli_upload_paths"))
     u.add_argument("--group", type=int, default=None, help=t("cli_group"))
 
+    pm = sub.add_parser("perms", help=t("cli_perms"))
+    pm.add_argument("subject_id", type=int, help=t("cli_perms_subject_id"))
+    pm.add_argument("assets", nargs="+", help=t("cli_perms_assets"))
+    pm.add_argument("--subject", choices=list(SUBJECT_TYPES), default="universe", help=t("cli_perms_subject"))
+    pm.add_argument("--dry-run", action="store_true", help=t("cli_dry"))
+    pm.add_argument("--delay", type=float, default=1.0, help=t("cli_delay"))
+
     g = sub.add_parser("lang", help=t("cli_lang"))
     g.add_argument("code", choices=list(i18n.LANGUAGES))
 
@@ -498,6 +591,8 @@ def main():
                           interactive=False)
         elif args.cmd == "upload":
             upload_images(rbx, args.paths, args.group)
+        elif args.cmd == "perms":
+            grant_permissions(rbx, args.subject, args.subject_id, args.assets, args.dry_run, False, args.delay)
         else:
             for key in kinds_for(args.what):
                 list_kind(rbx, key, args.universe)

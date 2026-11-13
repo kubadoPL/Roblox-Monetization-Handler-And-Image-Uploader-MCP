@@ -60,6 +60,7 @@ python copy_devproducts.py
 3) Copy / update both
 4) Print names and IDs (developer products + game passes)
 5) Upload images (decals) -> image IDs
+6) Grant asset permissions (animations, meshes... from another group) to an experience
 9) Language: English
 0) Exit
 ```
@@ -94,7 +95,13 @@ python copy_devproducts.py list all  UNIVERSE_ID
 # Upload images as decals (files or folders), print their image IDs
 python copy_devproducts.py upload "C:/Icons" extra.png
 python copy_devproducts.py upload "C:/Icons" --group GROUP_ID
+
+# Let an experience use assets owned by another group (fixes "Requester does not have permission for Asset")
+python copy_devproducts.py perms UNIVERSE_ID 81244673456906 73444706577963
+python copy_devproducts.py perms UNIVERSE_ID "C:/Game/Data_Anims.luau" --dry-run
 ```
+
+`perms` grants the **Use** permission on the assets to the experience (`--subject group` / `user` for a group or an account). Asset IDs can be given directly or read from text / Lua files and folders: every `rbxassetid://<id>` and every 9-16 digit number is picked up, so check the list with `--dry-run` first. The account behind the cookie needs edit rights on the assets. A report is saved to `lists/permissions_*.json`.
 
 | Option | Description |
 |---|---|
@@ -102,6 +109,7 @@ python copy_devproducts.py upload "C:/Icons" --group GROUP_ID
 | `--icons` | Copy icons to newly created items |
 | `--delay` | Pause between requests in seconds (default `1.0`) |
 | `--group` | `upload` only: upload to this group instead of your account |
+| `--subject` | `perms` only: `universe` (default), `group` or `user` |
 
 ### Output files
 
@@ -136,6 +144,7 @@ return {
 | `disable_item` | Takes an item off sale |
 | `copy_items` | Copies or syncs items between experiences. Defaults to a dry run |
 | `upload_images` | Uploads image files or folders as decals; returns each decal ID and image ID |
+| `grant_asset_permissions` | Lets an experience use assets owned by another group or user (animations, meshes, sounds) |
 
 ### Setup with Claude Code
 

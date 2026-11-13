@@ -17,7 +17,7 @@ from typing import Literal
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from copy_devproducts import KINDS, Roblox, Abort, copy_kind, load_cookie, price_of, bool_str
+from copy_devproducts import KINDS, Roblox, Abort, copy_kind, grant_permissions, load_cookie, price_of, bool_str
 from copy_devproducts import upload_images as upload_image_files
 from i18n import t
 
@@ -31,7 +31,9 @@ server = MCPServer(
         "Roblox doesn't allow deleting - disable_item takes an item off sale. "
         "Before calling copy_items with dry_run=False, show the user the dry_run=True result first. "
         "upload_images uploads image files as decals; use the returned imageId (rbxassetid://<imageId>) "
-        "for ImageLabels / renderImage, not the decalId."
+        "for ImageLabels / renderImage, not the decalId. "
+        "grant_asset_permissions lets an experience use assets owned by another group or user (animations, "
+        "meshes, sounds); it needs edit rights on those assets."
     ),
 )
 
@@ -151,6 +153,20 @@ def upload_images(paths: list[str], group_id: int | None = None) -> list[dict]:
     # stdout is the MCP protocol channel - capture the progress log
     with contextlib.redirect_stdout(log):
         return upload_image_files(rbx(), paths, group_id)
+
+
+@tool
+def grant_asset_permissions(subject_id: int, asset_ids: list[str],
+                            subject_type: Literal["universe", "group", "user"] = "universe",
+                            dry_run: bool = False) -> dict:
+    """Grants the 'Use' permission on assets (animations, meshes, sounds, ...) to an experience, so it can use
+    assets owned by another group or user - the fix for 'Requester does not have permission for Asset'.
+    subject_id is the universe ID (or group / user ID for subject_type). asset_ids: asset IDs as strings, or
+    text / Lua files and folders to read IDs from. Returns the IDs that succeeded and the errors."""
+    log = io.StringIO()
+    # stdout is the MCP protocol channel - capture the progress log
+    with contextlib.redirect_stdout(log):
+        return grant_permissions(rbx(), subject_type, subject_id, asset_ids, dry_run=dry_run)
 
 
 if __name__ == "__main__":
