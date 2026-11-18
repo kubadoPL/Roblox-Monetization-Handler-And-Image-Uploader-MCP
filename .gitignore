@@ -4,3 +4,4 @@ mapping_*.lua
 __pycache__/
 settings.json
 lists/
+animations/

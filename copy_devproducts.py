@@ -19,12 +19,16 @@ Cookie: ROBLOSECURITY env variable, cookie.txt next to the script, or pasted at 
 """
 
 import argparse
+import base64
+import binascii
 import getpass
 import json
 import os
 import re
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import requests
@@ -42,6 +46,30 @@ PERMISSION_BATCH = 25  # assets per request
 TEXT_SUFFIXES = {".lua", ".luau", ".txt", ".json", ".md", ".csv"}
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".bmp": "image/bmp",
                ".tga": "image/tga"}
+ANIMATION_TYPES = {".rbxm": "model/x-rbxm", ".rbxmx": "model/x-rbxm"}
+ANIM_DIR = HERE / "animations"  # where the receiver saves KeyframeSequences sent from Studio
+RECEIVER_PORT = 8765
+
+# Run in Studio (command bar, or an MCP's execute_luau) to send every KeyframeSequence under ROOT to the receiver.
+# Needs Game Settings -> Security -> Allow HTTP Requests (command bar) or 127.0.0.1 in the MCP's HTTP allowlist.
+# Files are named <Model>__<KeyframeSequence>, e.g. President__PresidentIdle.rbxm.
+STUDIO_SCRIPT = """local ROOT = {root}
+local URL = "http://127.0.0.1:{port}/"
+local HttpService = game:GetService("HttpService")
+local SerializationService = game:GetService("SerializationService")
+local EncodingService = game:GetService("EncodingService")
+local sent, failed = {{}}, {{}}
+for _, sequence in ROOT:GetDescendants() do
+	if not sequence:IsA("KeyframeSequence") then continue end
+	local model = sequence:FindFirstAncestorWhichIsA("Model")
+	local name = ((model and model.Name or "Animation") .. "__" .. sequence.Name):gsub("[^%w_%-]", "_")
+	local ok, err = pcall(function()
+		local data = SerializationService:SerializeInstancesAsync({{ sequence }})
+		HttpService:PostAsync(URL .. name, buffer.tostring(EncodingService:Base64Encode(data)), Enum.HttpContentType.TextPlain)
+	end)
+	table.insert(if ok then sent else failed, if ok then name else name .. ": " .. tostring(err))
+end
+return ("sent %d: %s\\nfailed %d: %s"):format(#sent, table.concat(sent, ", "), #failed, table.concat(failed, " | "))"""
 
 KINDS = {
     "dev": {
@@ -158,6 +186,33 @@ class Roblox:
                 break
             time.sleep(3)
         return {"name": path.stem, "decalId": decal_id, "imageId": image_id}
+
+    def upload_animation(self, path: Path, name: str | None = None, description: str = "",
+                         group_id: int | None = None) -> int:
+        """Uploads a KeyframeSequence saved as .rbxm / .rbxmx as an Animation. Returns its asset id
+        (rbxassetid://<id> for Animation.AnimationId). An animation plays only in experiences of its owner, so
+        upload it to the group that owns the game (group_id)."""
+        creator = {"groupId": str(group_id)} if group_id else {"userId": str(self.user_id())}
+        request = {
+            "assetType": "Animation",
+            "displayName": (name or path.stem)[:50],
+            "description": description,
+            "creationContext": {"creator": creator},
+        }
+        files = {
+            "request": (None, json.dumps(request), "application/json"),
+            "fileContent": (path.name, path.read_bytes(), ANIMATION_TYPES.get(path.suffix.lower(), "model/x-rbxm")),
+        }
+        op = self.request("POST", f"{ASSETS}/assets", files=files)
+        op_id = op.get("operationId") or op.get("path", "").split("/")[-1]
+        for _ in range(30):
+            if op.get("done"):
+                break
+            time.sleep(2)
+            op = self.request("GET", f"{ASSETS}/operations/{op_id}")
+        if not op.get("done"):
+            raise RuntimeError(t("up_timeout"))
+        return int(op["response"]["assetId"])
 
     def grant_asset_permission(self, subject_type: str, subject_id: int, asset_ids: list[int],
                                action: str = "Use") -> dict:
@@ -407,6 +462,89 @@ def upload_images(rbx: Roblox, paths: list[str], group_id: int | None = None) ->
     return results
 
 
+def animation_files(paths: list[str]) -> list[Path]:
+    """Every .rbxm / .rbxmx among the given files and folders (folders: their files, not subfolders)."""
+    files = []
+    for raw in paths:
+        p = Path(raw.strip().strip('"'))
+        if p.is_dir():
+            files.extend(sorted(f for f in p.iterdir() if f.suffix.lower() in ANIMATION_TYPES))
+        elif p.is_file() and p.suffix.lower() in ANIMATION_TYPES:
+            files.append(p)
+    return files
+
+
+def upload_animations(rbx: Roblox, paths: list[str], group_id: int | None = None) -> list[dict]:
+    """Uploads the animation files, prints name -> animation id and saves the mapping to lists/."""
+    files = animation_files(paths or [str(ANIM_DIR)])
+    if not files:
+        raise Abort(t("an_none"))
+    results = []
+    for n, path in enumerate(files, 1):
+        try:
+            animation_id = rbx.upload_animation(path, group_id=group_id)
+            print(t("an_ok", n=n, total=len(files), name=path.stem, id=animation_id))
+            results.append({"name": path.stem, "animationId": animation_id})
+        except (RuntimeError, OSError) as e:
+            print(t("up_error", n=n, total=len(files), name=path.stem, err=e))
+            results.append({"name": path.stem, "error": str(e)})
+
+    out_dir = HERE / "lists"
+    out_dir.mkdir(exist_ok=True)
+    stem = f"animations_{time.strftime('%Y%m%d_%H%M%S')}"
+    (out_dir / f"{stem}.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
+    lua = "return {\n" + "".join(
+        f'\t[{json.dumps(r["name"])}] = "rbxassetid://{r["animationId"]}",\n' for r in results if r.get("animationId")
+    ) + "}\n"
+    (out_dir / f"{stem}.lua").write_text(lua, encoding="utf-8")
+    print(t("mapping_saved", stem=f"lists/{stem}"))
+    return results
+
+
+class _AnimationHandler(BaseHTTPRequestHandler):
+    out_dir: Path = ANIM_DIR
+
+    def do_GET(self):  # health check
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def do_POST(self):
+        name = re.sub(r"[^A-Za-z0-9_\-]", "_", self.path.strip("/")) or "Animation"
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        try:
+            data = base64.b64decode(body, validate=True)
+        except (ValueError, binascii.Error):
+            data = body  # sent raw
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        (self.out_dir / f"{name}.rbxm").write_bytes(data)
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(str(len(data)).encode())
+
+    def log_message(self, *args):  # stdout may be the MCP channel
+        pass
+
+
+_receiver: ThreadingHTTPServer | None = None
+
+
+def start_animation_receiver(port: int = RECEIVER_PORT, out_dir: Path = ANIM_DIR) -> ThreadingHTTPServer:
+    """Starts (once) a local HTTP server on 127.0.0.1 that saves what Studio sends (STUDIO_SCRIPT) as .rbxm
+    files in out_dir. Runs in a background thread."""
+    global _receiver
+    _AnimationHandler.out_dir = out_dir
+    if _receiver is None:
+        _receiver = ThreadingHTTPServer(("127.0.0.1", port), _AnimationHandler)
+        threading.Thread(target=_receiver.serve_forever, daemon=True).start()
+    return _receiver
+
+
+def studio_script(root: str, port: int = RECEIVER_PORT) -> str:
+    """The Luau to run in Studio; root is an instance path such as game.ReplicatedStorage.Assets.Generals."""
+    return STUDIO_SCRIPT.format(root=root, port=port)
+
+
 def asset_ids_from(sources: list[str]) -> list[int]:
     """Asset IDs from the given items: plain numbers, or text/Lua files and folders (a folder's files,
     not subfolders). In files, every rbxassetid://<id> and every 9-16 digit number counts."""
@@ -496,7 +634,7 @@ def menu():
     rbx = None
     while True:
         print()
-        for key in ("m_copy_dev", "m_copy_pass", "m_copy_all", "m_list", "m_upload", "m_perms"):
+        for key in ("m_copy_dev", "m_copy_pass", "m_copy_all", "m_list", "m_upload", "m_perms", "m_anims"):
             print(t(key))
         print(t("m_lang", lang=i18n.LANGUAGES[i18n.lang]))
         print(t("m_exit"))
@@ -506,7 +644,7 @@ def menu():
         if choice == "9":
             toggle_language()
             continue
-        if choice not in actions and choice not in ("5", "6"):
+        if choice not in actions and choice not in ("5", "6", "7"):
             continue
         # Ask for the cookie only on the first action, so the language can be changed without signing in
         rbx = rbx or Roblox(load_cookie())
@@ -521,6 +659,14 @@ def menu():
                 subject_id = ask_int(t("ask_universe"))
                 sources = input(t("ask_asset_ids")).replace(",", " ").split()
                 grant_permissions(rbx, "universe", subject_id, sources, interactive=True)
+            except (Abort, RuntimeError, OSError) as e:
+                print(f"\n{e}")
+            continue
+        if choice == "7":
+            try:
+                path = input(t("ask_anim_path")).strip() or str(ANIM_DIR)
+                group = input(t("ask_anim_group")).strip()
+                upload_animations(rbx, [path], int(group) if group.isdigit() else None)
             except (Abort, RuntimeError, OSError) as e:
                 print(f"\n{e}")
             continue
@@ -572,6 +718,14 @@ def main():
     pm.add_argument("--dry-run", action="store_true", help=t("cli_dry"))
     pm.add_argument("--delay", type=float, default=1.0, help=t("cli_delay"))
 
+    an = sub.add_parser("anims", help=t("cli_anims"))
+    an.add_argument("paths", nargs="*", help=t("cli_anims_paths"))
+    an.add_argument("--group", type=int, default=None, help=t("cli_group"))
+
+    rc = sub.add_parser("receive", help=t("cli_receive"))
+    rc.add_argument("root", nargs="?", default="game.ReplicatedStorage", help=t("cli_receive_root"))
+    rc.add_argument("--port", type=int, default=RECEIVER_PORT)
+
     g = sub.add_parser("lang", help=t("cli_lang"))
     g.add_argument("code", choices=list(i18n.LANGUAGES))
 
@@ -580,6 +734,14 @@ def main():
         i18n.set_language(args.code)
         print(t("lang_set", lang=i18n.LANGUAGES[args.code]))
         return
+    if args.cmd == "receive":
+        start_animation_receiver(args.port)
+        print(t("rc_listening", port=args.port, folder=ANIM_DIR))
+        print("\n" + studio_script(args.root, args.port) + "\n")
+        try:
+            threading.Event().wait()
+        except KeyboardInterrupt:
+            return
 
     rbx = Roblox(load_cookie())
     try:
@@ -591,6 +753,8 @@ def main():
                           interactive=False)
         elif args.cmd == "upload":
             upload_images(rbx, args.paths, args.group)
+        elif args.cmd == "anims":
+            upload_animations(rbx, args.paths, args.group)
         elif args.cmd == "perms":
             grant_permissions(rbx, args.subject, args.subject_id, args.assets, args.dry_run, False, args.delay)
         else:

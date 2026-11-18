@@ -101,6 +101,23 @@ python copy_devproducts.py perms UNIVERSE_ID 81244673456906 73444706577963
 python copy_devproducts.py perms UNIVERSE_ID "C:/Game/Data_Anims.luau" --dry-run
 ```
 
+### Animations from Studio (AnimSaves)
+
+Animations saved in a model's `AnimSaves` are KeyframeSequences that only exist in your place. To publish them:
+
+```bash
+# 1. Start the receiver; it prints a Luau script
+python copy_devproducts.py receive game.ReplicatedStorage.Assets.Generals
+
+# 2. Run that script in Studio (command bar). It sends every KeyframeSequence under the given instance,
+#    saved as animations/<Model>__<Sequence>.rbxm
+
+# 3. Upload them to the group that owns the game (an animation plays only in its owner's experiences)
+python copy_devproducts.py anims --group GROUP_ID
+```
+
+Studio has to be allowed to reach `127.0.0.1`: for the command bar turn on **Game Settings → Security → Allow HTTP Requests**; for an AI assistant using the Roblox Studio MCP, add `127.0.0.1` to its HTTP allowlist. The name → animation ID mapping is saved to `lists/animations_<time>.json` / `.lua`.
+
 `perms` grants the **Use** permission on the assets to the experience (`--subject group` / `user` for a group or an account). Asset IDs can be given directly or read from text / Lua files and folders: every `rbxassetid://<id>` and every 9-16 digit number is picked up, so check the list with `--dry-run` first. The account behind the cookie needs edit rights on the assets. A report is saved to `lists/permissions_*.json`.
 
 | Option | Description |
@@ -120,6 +137,8 @@ python copy_devproducts.py perms UNIVERSE_ID "C:/Game/Data_Anims.luau" --dry-run
 | `lists/list_devproducts_<id>.txt` / `.lua` | Names, prices and IDs of developer products |
 | `lists/list_gamepasses_<id>.txt` / `.lua` | Names, prices and IDs of game passes |
 | `lists/images_<time>.json` / `.lua` | Uploaded images: name → decal ID and image ID (`["name"] = "rbxassetid://<image>"`) |
+| `lists/animations_<time>.json` / `.lua` | Uploaded animations: name → animation ID (`["Model__Sequence"] = "rbxassetid://<id>"`) |
+| `animations/` | KeyframeSequences received from Studio (`<Model>__<Sequence>.rbxm`) |
 
 Example Lua mapping:
 
@@ -145,6 +164,8 @@ return {
 | `copy_items` | Copies or syncs items between experiences. Defaults to a dry run |
 | `upload_images` | Uploads image files or folders as decals; returns each decal ID and image ID |
 | `grant_asset_permissions` | Lets an experience use assets owned by another group or user (animations, meshes, sounds) |
+| `start_animation_receiver` | Starts a local receiver and returns the Luau that sends a model's `AnimSaves` (KeyframeSequences) from Studio to it |
+| `upload_animations` | Uploads `.rbxm` / `.rbxmx` KeyframeSequences as animations; returns each animation ID |
 
 ### Setup with Claude Code
 

@@ -18,6 +18,9 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from copy_devproducts import KINDS, Roblox, Abort, copy_kind, grant_permissions, load_cookie, price_of, bool_str
+from copy_devproducts import ANIM_DIR, RECEIVER_PORT, studio_script
+from copy_devproducts import start_animation_receiver as start_receiver_server
+from copy_devproducts import upload_animations as upload_animation_files
 from copy_devproducts import upload_images as upload_image_files
 from i18n import t
 
@@ -33,7 +36,10 @@ server = MCPServer(
         "upload_images uploads image files as decals; use the returned imageId (rbxassetid://<imageId>) "
         "for ImageLabels / renderImage, not the decalId. "
         "grant_asset_permissions lets an experience use assets owned by another group or user (animations, "
-        "meshes, sounds); it needs edit rights on those assets."
+        "meshes, sounds); it needs edit rights on those assets. "
+        "Animations from Studio (e.g. a model's AnimSaves): call start_animation_receiver, run the returned "
+        "studio_script in Studio (Roblox Studio MCP execute_luau, or the command bar), then upload_animations. "
+        "Upload animations to the group that owns the game (group_id), or they won't play in it."
     ),
 )
 
@@ -153,6 +159,29 @@ def upload_images(paths: list[str], group_id: int | None = None) -> list[dict]:
     # stdout is the MCP protocol channel - capture the progress log
     with contextlib.redirect_stdout(log):
         return upload_image_files(rbx(), paths, group_id)
+
+
+@tool
+def start_animation_receiver(root: str = "game.ReplicatedStorage", port: int = RECEIVER_PORT) -> dict:
+    """Starts a local receiver (127.0.0.1) for KeyframeSequences from Roblox Studio and returns the Luau to run
+    there. root is the Studio instance to send from (every KeyframeSequence under it, e.g.
+    game.ReplicatedStorage.Assets.Generals); files are saved as <Model>__<Sequence>.rbxm in the returned folder.
+    Studio must be allowed to reach 127.0.0.1: the Studio MCP's HTTP allowlist for execute_luau, or Game Settings
+    -> Security -> Allow HTTP Requests for the command bar. Then call upload_animations."""
+    start_receiver_server(port)
+    return {"url": f"http://127.0.0.1:{port}/", "folder": str(ANIM_DIR), "studio_script": studio_script(root, port)}
+
+
+@tool
+def upload_animations(paths: list[str] | None = None, group_id: int | None = None) -> list[dict]:
+    """Uploads KeyframeSequences saved as .rbxm / .rbxmx (files or folders; default: the receiver's folder) as
+    Animation assets. Returns, per file: name and animationId (rbxassetid://<animationId> for
+    Animation.AnimationId). group_id: the group that owns the game - an animation plays only in its owner's
+    experiences. A mapping is also saved to lists/animations_<time>.json / .lua."""
+    log = io.StringIO()
+    # stdout is the MCP protocol channel - capture the progress log
+    with contextlib.redirect_stdout(log):
+        return upload_animation_files(rbx(), paths or [], group_id)
 
 
 @tool
