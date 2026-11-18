@@ -49,13 +49,14 @@ IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                ".tga": "image/tga"}
 ANIMATION_TYPES = {".rbxm": "model/x-rbxm", ".rbxmx": "model/x-rbxm"}
 ANIM_DIR = HERE / "animations"  # where the receiver saves KeyframeSequences sent from Studio
-RECEIVER_PORT = 8765
+# 80: Studio's MCP HTTP allowlist matches "127.0.0.1" only without a port
+RECEIVER_PORT = 80
 
 # Run in Studio (command bar, or an MCP's execute_luau) to send every KeyframeSequence under ROOT to the receiver.
 # Needs Game Settings -> Security -> Allow HTTP Requests (command bar) or 127.0.0.1 in the MCP's HTTP allowlist.
 # Files are named <Model>__<KeyframeSequence>, e.g. President__PresidentIdle.rbxm.
 STUDIO_SCRIPT = """local ROOT = {root}
-local URL = "http://127.0.0.1:{port}/"
+local URL = "{url}"
 local HttpService = game:GetService("HttpService")
 local SerializationService = game:GetService("SerializationService")
 local EncodingService = game:GetService("EncodingService")
@@ -564,7 +565,11 @@ def start_animation_receiver(port: int = RECEIVER_PORT, out_dir: Path = ANIM_DIR
 
 def studio_script(root: str, port: int = RECEIVER_PORT) -> str:
     """The Luau to run in Studio; root is an instance path such as game.ReplicatedStorage.Assets.Generals."""
-    return STUDIO_SCRIPT.format(root=root, port=port)
+    return STUDIO_SCRIPT.format(root=root, url=receiver_url(port))
+
+
+def receiver_url(port: int = RECEIVER_PORT) -> str:
+    return "http://127.0.0.1/" if port == 80 else f"http://127.0.0.1:{port}/"
 
 
 def asset_ids_from(sources: list[str]) -> list[int]:

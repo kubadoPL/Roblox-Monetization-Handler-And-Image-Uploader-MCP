@@ -18,7 +18,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from copy_devproducts import KINDS, Roblox, Abort, copy_kind, grant_permissions, load_cookie, price_of, bool_str
-from copy_devproducts import ANIM_DIR, RECEIVER_PORT, studio_script
+from copy_devproducts import ANIM_DIR, RECEIVER_PORT, receiver_url, studio_script
 from copy_devproducts import start_animation_receiver as start_receiver_server
 from copy_devproducts import upload_animations as upload_animation_files
 from copy_devproducts import upload_images as upload_image_files
@@ -169,7 +169,7 @@ def start_animation_receiver(root: str = "game.ReplicatedStorage", port: int = R
     Studio must be allowed to reach 127.0.0.1: the Studio MCP's HTTP allowlist for execute_luau, or Game Settings
     -> Security -> Allow HTTP Requests for the command bar. Then call upload_animations."""
     start_receiver_server(port)
-    return {"url": f"http://127.0.0.1:{port}/", "folder": str(ANIM_DIR), "studio_script": studio_script(root, port)}
+    return {"url": receiver_url(port), "folder": str(ANIM_DIR), "studio_script": studio_script(root, port)}
 
 
 @tool

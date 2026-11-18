@@ -1,8 +1,8 @@
 # 💰 Roblox Monetization Handler And Image Uploader MCP
 
-A Python tool for copying and syncing **developer products** and **game passes** between Roblox experiences, without an Open Cloud API key. It signs in with your `.ROBLOSECURITY` cookie and uses the same `apis.roblox.com` endpoints as the Creator Dashboard.
+A Python tool for copying and syncing **developer products** and **game passes** between Roblox experiences, uploading **images** and **animations**, and sharing assets between groups, all without an Open Cloud API key. It signs in with your `.ROBLOSECURITY` cookie and uses the same `apis.roblox.com` endpoints as the Creator Dashboard.
 
-It ships with an **MCP server**, so AI assistants such as Claude Code can list, create, update and disable products for you.
+It ships with an **MCP server**, so AI assistants such as Claude Code can list, create, update and disable products, and upload images and animations (straight from a model's `AnimSaves` in Studio) for you.
 
 ---
 
@@ -16,6 +16,8 @@ It ships with an **MCP server**, so AI assistants such as Claude Code can list, 
 - **List names and IDs** of all developer products and game passes in an experience, saved to `.txt` and to a Lua `["name"] = id` table.
 - **Managed Pricing fallback.** If the target experience hasn't accepted Managed Pricing, items are created without it. Accept it in the dashboard and run the tool again to turn it on.
 - **Upload images as decals** (single files or whole folders) and get each one's **image ID**, the one `ImageLabel.Image` / `rbxassetid://` needs. The name → image ID mapping is saved to JSON and a Lua table.
+- **Upload animations** from a model's `AnimSaves` in Studio: a local receiver takes the KeyframeSequences Studio sends (big ones in parts), and they are uploaded as Animation assets to your account or a group. The name → animation ID mapping is saved to JSON and a Lua table.
+- **Grant asset permissions** so an experience can use animations, meshes or sounds owned by another group or user.
 - **Handles CSRF tokens and rate limits** automatically.
 
 ---
@@ -116,7 +118,7 @@ python copy_devproducts.py receive game.ReplicatedStorage.Assets.Generals
 python copy_devproducts.py anims --group GROUP_ID
 ```
 
-Studio has to be allowed to reach `127.0.0.1`: for the command bar turn on **Game Settings → Security → Allow HTTP Requests**; for an AI assistant using the Roblox Studio MCP, add `127.0.0.1` to its HTTP allowlist. The name → animation ID mapping is saved to `lists/animations_<time>.json` / `.lua`.
+Studio has to be allowed to reach `127.0.0.1`: for the command bar turn on **Game Settings → Security → Allow HTTP Requests**; for an AI assistant using the Roblox Studio MCP, add `127.0.0.1` to its HTTP allowlist (see [Animations with the Roblox Studio MCP](#animations-with-the-roblox-studio-mcp)). The receiver listens on port 80 by default; `--port` changes it. Animations over 1 MB are sent in parts. The name → animation ID mapping is saved to `lists/animations_<time>.json` / `.lua`.
 
 `perms` grants the **Use** permission on the assets to the experience (`--subject group` / `user` for a group or an account). Asset IDs can be given directly or read from text / Lua files and folders: every `rbxassetid://<id>` and every 9-16 digit number is picked up, so check the list with `--dry-run` first. The account behind the cookie needs edit rights on the assets. A report is saved to `lists/permissions_*.json`.
 
@@ -169,19 +171,56 @@ return {
 
 ### Setup with Claude Code
 
-1. Put your cookie in `cookie.txt` or set the `ROBLOSECURITY` environment variable. The MCP server can't prompt for it.
-2. Register the server:
+1. Install the requirements (the MCP server needs `mcp` 2.3 or newer):
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. Put your cookie in `cookie.txt` or set the `ROBLOSECURITY` environment variable. The MCP server can't prompt for it.
+3. Register the server. With the Claude Code CLI:
 
    ```bash
    claude mcp add --scope user roblox-monetization -- python "C:/path/to/mcp_server.py"
    ```
 
-3. Restart Claude Code, then ask things like:
+   Without the CLI (for example only the VS Code extension), add it to `mcpServers` in `~/.claude.json` (`C:\Users\<you>\.claude.json` on Windows), which is what `--scope user` does:
+
+   ```json
+   "mcpServers": {
+     "roblox-monetization": {
+       "type": "stdio",
+       "command": "python",
+       "args": ["C:\\path\\to\\mcp_server.py"],
+       "env": {}
+     }
+   }
+   ```
+
+4. Restart Claude Code (in VS Code: reload the window), then ask things like:
    - *"Create a game pass called VIP for 299 Robux in experience 10773645374"*
    - *"Copy all game passes from 10480068191 to 10773645374"*
    - *"Raise the price of every developer product in 10773645374 by 20%"*
+   - *"Upload the AnimSaves animations of every model in ReplicatedStorage.Assets.Generals to group 969017921"*
+
+5. **For animation uploads only:** in Roblox Studio open **Assistant Settings → MCP Permissions → Connect to the internet → HTTP domain allow list** and add `127.0.0.1` (exactly that, without a port). Without it Studio can't send the `AnimSaves` to the receiver and every request fails with *"domain 127.0.0.1 is not in the Assistant HTTP allowlist"*. See [Animations with the Roblox Studio MCP](#animations-with-the-roblox-studio-mcp).
+
+After changing the tool's code, restart Claude Code again: the MCP server keeps the code it started with.
 
 Other MCP clients work too: run `python mcp_server.py` as a stdio server.
+
+### Animations with the Roblox Studio MCP
+
+To upload animations straight from Studio, the assistant also needs the **Roblox Studio MCP** (it runs the Luau that sends the KeyframeSequences).
+
+> ⚠️ **Required permission:** add `127.0.0.1` to Studio's **Assistant Settings → MCP Permissions → Connect to the internet → HTTP domain allow list**. This is the only permission the animation upload needs in Studio, and nothing is sent anywhere else: the files go to the receiver on your own machine, and the upload to Roblox is done by this tool with your cookie.
+
+In Studio, open **Assistant Settings → MCP Permissions** and:
+
+- under **Connect to the internet → HTTP domain allow list**, add `127.0.0.1`. The list matches the address without a port, so the receiver listens on port **80** by default (`start_animation_receiver(port=...)` / `receive --port` change it).
+- Port 80 must be free on your machine. If something already uses it, pick another port and use Studio's command bar with **Game Settings → Security → Allow HTTP Requests** instead.
+
+The assistant then calls `start_animation_receiver`, runs the returned `studio_script` with the Studio MCP's `execute_luau`, and calls `upload_animations` with the group that owns the game. Animations play only in experiences of their owner, so upload them to that group.
 
 ---
 
