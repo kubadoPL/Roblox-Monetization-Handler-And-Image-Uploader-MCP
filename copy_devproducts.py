@@ -30,6 +30,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -58,6 +59,7 @@ local URL = "http://127.0.0.1:{port}/"
 local HttpService = game:GetService("HttpService")
 local SerializationService = game:GetService("SerializationService")
 local EncodingService = game:GetService("EncodingService")
+local CHUNK = 900000 -- HttpService posts are limited to 1024 KB, so big animations go in parts
 local sent, failed = {{}}, {{}}
 for _, sequence in ROOT:GetDescendants() do
 	if not sequence:IsA("KeyframeSequence") then continue end
@@ -65,7 +67,12 @@ for _, sequence in ROOT:GetDescendants() do
 	local name = ((model and model.Name or "Animation") .. "__" .. sequence.Name):gsub("[^%w_%-]", "_")
 	local ok, err = pcall(function()
 		local data = SerializationService:SerializeInstancesAsync({{ sequence }})
-		HttpService:PostAsync(URL .. name, buffer.tostring(EncodingService:Base64Encode(data)), Enum.HttpContentType.TextPlain)
+		local encoded = buffer.tostring(EncodingService:Base64Encode(data))
+		local parts = math.max(1, math.ceil(#encoded / CHUNK))
+		for part = 1, parts do
+			local chunk = encoded:sub((part - 1) * CHUNK + 1, part * CHUNK)
+			HttpService:PostAsync(URL .. name .. "?part=" .. part .. "&parts=" .. parts, chunk, Enum.HttpContentType.TextPlain)
+		end
 	end)
 	table.insert(if ok then sent else failed, if ok then name else name .. ": " .. tostring(err))
 end
@@ -509,13 +516,28 @@ class _AnimationHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"ok")
 
+    chunks: dict[str, dict[int, bytes]] = {}  # name -> part -> base64 text, until every part is in
+
     def do_POST(self):
-        name = re.sub(r"[^A-Za-z0-9_\-]", "_", self.path.strip("/")) or "Animation"
+        url = urlparse(self.path)
+        name = re.sub(r"[^A-Za-z0-9_\-]", "_", url.path.strip("/")) or "Animation"
+        query = parse_qs(url.query)
+        part = int(query.get("part", ["1"])[0])
+        parts = int(query.get("parts", ["1"])[0])
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        received = self.chunks.setdefault(name, {})
+        received[part] = body
+        if len(received) < parts:
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(f"part {part}/{parts}".encode())
+            return
+        joined = b"".join(received[i] for i in range(1, parts + 1))
+        del self.chunks[name]
         try:
-            data = base64.b64decode(body, validate=True)
+            data = base64.b64decode(joined, validate=True)
         except (ValueError, binascii.Error):
-            data = body  # sent raw
+            data = joined  # sent raw
         self.out_dir.mkdir(parents=True, exist_ok=True)
         (self.out_dir / f"{name}.rbxm").write_bytes(data)
         self.send_response(200)
